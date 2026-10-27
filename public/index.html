@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>סוכן וואטסאפ</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">●</span>
+      <div>
+        <h1 id="agent-title">סוכן וואטסאפ</h1>
+        <p class="sub">חבר AI שיושב בקבוצות שלך</p>
+      </div>
+    </div>
+    <div class="status-area">
+      <button id="api-warning" class="pill warn pill-btn" hidden>מפתח Claude לא הוגדר</button>
+      <span id="wa-pill" class="pill">מתחבר…</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="connect">חיבור</button>
+    <button class="tab" data-tab="behavior">אישיות והתנהגות</button>
+    <button class="tab" data-tab="chats">קבוצות ושיחות</button>
+    <button class="tab" data-tab="playground">מגרש ניסויים</button>
+    <button class="tab" data-tab="activity">פעילות</button>
+  </nav>
+
+  <main>
+    <!-- Connection -->
+    <section id="tab-connect" class="panel active">
+      <div class="card apikey-card">
+        <div class="apikey-head">
+          <h2>מפתח Claude API</h2>
+          <span id="apikey-status" class="pill"></span>
+        </div>
+        <form id="apikey-form" class="row" autocomplete="off">
+          <input name="key" type="password" placeholder="sk-ant-…" dir="ltr" autocomplete="off" spellcheck="false">
+          <button class="btn primary" type="submit">שמירה ובדיקה</button>
+          <button id="apikey-clear" class="btn danger" type="button" hidden>הסרה</button>
+        </form>
+        <p class="hint" id="apikey-hint"></p>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <h2>חיבור לוואטסאפ</h2>
+          <div id="connect-open" hidden>
+            <p class="big-ok">✓ מחובר</p>
+            <p id="me-line" class="muted"></p>
+            <p>עכשיו אפשר לצרף את המספר הזה לקבוצות כמו כל חבר רגיל. קבוצות חדשות יופיעו בלשונית "קבוצות ושיחות".</p>
+            <button id="logout-btn" class="btn danger">ניתוק המכשיר המקושר</button>
+          </div>
+          <div id="connect-qr" hidden>
+            <p>בטלפון שבו פתוח הוואטסאפ של הסוכן: <b>הגדרות ← מכשירים מקושרים ← קישור מכשיר</b>, וסורקים:</p>
+            <div class="qr-box"><img id="qr-img" alt="QR לחיבור"></div>
+            <details class="pair">
+              <summary>אין אפשרות לסרוק? חיבור עם קוד</summary>
+              <p class="muted">בטלפון: מכשירים מקושרים ← קישור מכשיר ← "קישור עם מספר טלפון במקום".</p>
+              <div class="row">
+                <input id="pair-phone" type="tel" placeholder="972501234567" dir="ltr">
+                <button id="pair-btn" class="btn">קבלת קוד</button>
+              </div>
+              <p id="pair-code" class="pair-code" hidden></p>
+            </details>
+          </div>
+          <div id="connect-wait">
+            <p class="muted"><span class="spinner"></span> <span id="wait-text">מתחבר לוואטסאפ…</span></p>
+          </div>
+          <p id="wa-error" class="error" hidden></p>
+        </div>
+
+        <div class="card soft">
+          <h2>איך משיגים מספר לסוכן</h2>
+          <ol class="steps">
+            <li><b>מספר ייעודי.</b> סים או eSIM פרי־פייד זול. מספרים וירטואליים (VoIP) נחסמים לרוב ע"י וואטסאפ.</li>
+            <li><b>פותחים עליו וואטסאפ.</b> הכי פשוט: אפליקציית <i>WhatsApp Business</i> על הטלפון שלך, שמאפשרת מספר שני לצד הוואטסאפ הרגיל. אפשר גם טלפון ישן.</li>
+            <li><b>מגדירים פרופיל</b>: שם ותמונה שהחברים יראו.</li>
+            <li><b>מקשרים</b> בסריקת ה-QR כאן. מעכשיו המערכת פועלת כ"מכשיר מקושר".</li>
+            <li><b>מצרפים את המספר לקבוצה</b> כמו כל משתתף.</li>
+          </ol>
+          <p class="note">חיבור כמכשיר מקושר הוא לא ממשק רשמי של וואטסאפ, ויש סיכון שהמספר ייחסם. לכן משתמשים במספר נפרד ולא באישי, ולא מגזימים בכמות ההודעות. כדי שהקישור לא יפוג, הטלפון של הסוכן צריך להתחבר לאינטרנט לפחות פעם בשבועיים.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Behavior -->
+    <section id="tab-behavior" class="panel">
+      <form id="settings-form" class="card">
+        <h2>מי הסוכן</h2>
+        <div class="grid two">
+          <label>שם הסוכן
+            <input name="agentName" required>
+          </label>
+          <label>מילים שקוראות לו <small>(מופרדות בפסיק)</small>
+            <input name="triggerWords" placeholder="ג׳ארוויס, בוט">
+          </label>
+        </div>
+        <label>אישיות והנחיות (הפרומפט הראשי)
+          <textarea name="persona" rows="9"></textarea>
+        </label>
+        <p class="hint">תאר את הסוכן כמו שהיית מתאר חבר: איך הוא מדבר, על מה הוא אוהב לדבר, מה אסור לו, איך הוא מתייחס לכל אחד. אפשר להוסיף הנחיות לקבוצה ספציפית בלשונית "קבוצות ושיחות".</p>
+
+        <h2>מתי הוא מגיב</h2>
+        <div class="grid three">
+          <label>ברירת מחדל לקבוצות
+            <select name="defaultGroupMode" data-options="MODES"></select>
+          </label>
+          <label>ברירת מחדל לשיחות פרטיות
+            <select name="defaultDmMode" data-options="MODES"></select>
+          </label>
+          <label>רמת מעורבות <small>(במצב "מחליט לבד")</small>
+            <select name="engagement" data-options="LEVELS" data-labels="engagement"></select>
+          </label>
+        </div>
+        <div id="mode-help" class="mode-help"></div>
+
+        <h2>סגנון</h2>
+        <div class="grid three">
+          <label>אורך תשובות
+            <select name="replyLength" data-options="LEVELS" data-labels="length"></select>
+          </label>
+          <label class="check"><input type="checkbox" name="allowReactions"> מותר להגיב באימוג׳י על הודעות</label>
+        </div>
+
+        <h2>שעות שקט</h2>
+        <div class="grid three">
+          <label>מ־<input type="time" name="quietFrom"></label>
+          <label>עד<input type="time" name="quietTo"></label>
+          <p class="hint">בשעות האלה הסוכן עונה רק כשפונים אליו ישירות. ריק = כבוי.</p>
+        </div>
+
+        <details class="advanced">
+          <summary>הגדרות מתקדמות</summary>
+          <div class="grid three">
+            <label>מודל
+              <select name="model" data-options="MODELS" data-labels="model"></select>
+            </label>
+            <label>עומק חשיבה
+              <select name="effort" data-options="EFFORTS" data-labels="effort"></select>
+            </label>
+            <label>כמה הודעות אחורה הוא קורא
+              <input type="number" name="contextMessages" min="10" max="500">
+            </label>
+            <label>המתנה לפני תגובה (שניות)
+              <input type="number" name="debounceSeconds" min="0" max="120" step="0.5">
+            </label>
+            <label>מקסימום פעולות בשעה לכל שיחה
+              <input type="number" name="maxActionsPerHour" min="0" max="500">
+            </label>
+          </div>
+          <p class="hint">ההמתנה מאפשרת לסוכן לקרוא רצף הודעות שלם לפני שהוא מגיב, במקום לענות על כל הודעה בנפרד.</p>
+        </details>
+
+        <div class="actions">
+          <button class="btn primary" type="submit">שמירה</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Chats -->
+    <section id="tab-chats" class="panel">
+      <div class="toolbar">
+        <p class="muted">לכל קבוצה אפשר לקבוע מצב והנחיות משלה. מה שלא מוגדר כאן נלקח מההגדרות הכלליות.</p>
+        <button id="refresh-groups" class="btn">רענון רשימת קבוצות</button>
+      </div>
+      <div id="chats-list" class="chats"></div>
+      <p id="chats-empty" class="empty" hidden>עוד אין קבוצות. אחרי שהמספר יחובר ויצורף לקבוצה, היא תופיע כאן.</p>
+    </section>
+
+    <!-- Playground -->
+    <section id="tab-playground" class="panel">
+      <div class="grid two">
+        <form id="play-form" class="card">
+          <h2>מה הסוכן היה עושה?</h2>
+          <p class="muted">בודקים את הפרומפט בלי לשלוח כלום לוואטסאפ. ההגדרות השמורות משמשות, ואם בוחרים קבוצה הסוכן רואה גם את ההודעות האחרונות שלה.</p>
+          <label>הקשר
+            <select name="chatJid" id="play-chat"><option value="">שיחה ריקה</option></select>
+          </label>
+          <div class="grid two">
+            <label>מי כותב
+              <input name="senderName" value="דני">
+            </label>
+            <label>מצב
+              <select name="mode" id="play-mode"></select>
+            </label>
+          </div>
+          <label>ההודעה
+            <textarea name="text" rows="4" placeholder="מישהו יודע מה פתוח בתל אביב בשתיים בלילה?"></textarea>
+          </label>
+          <label class="check"><input type="checkbox" name="addressed"> ההודעה מתייגת את הסוכן</label>
+          <div class="actions">
+            <button class="btn primary" type="submit">נסה</button>
+          </div>
+        </form>
+        <div class="card" id="play-result">
+          <h2>תוצאה</h2>
+          <p class="muted">כאן תופיע ההחלטה של הסוכן.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Activity -->
+    <section id="tab-activity" class="panel">
+      <div id="events" class="events"></div>
+      <p id="events-empty" class="empty" hidden>עוד אין פעילות.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
