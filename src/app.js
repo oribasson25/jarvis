@@ -5,6 +5,7 @@ import * as db from './db.js';
 import { apiKeyInfo, clearApiKey, describeError, saveApiKey } from './agent.js';
 import { clearAuth } from './auth-state.js';
 import { kickWorker, markDashboardActive, publishState, readControl, sendCommand } from './control.js';
+import { buildKnowledge, digestPart, jobState } from './knowledge.js';
 import { hasPersistentStore } from './redis.js';
 import { simulate } from './router.js';
 import { logger } from './logger.js';
@@ -50,7 +51,7 @@ let lastKick = 0;
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '4mb' })); // Vercel rejects request bodies over 4.5MB
 
   const api = express.Router();
   api.use(requirePassword);
@@ -96,7 +97,13 @@ export function createApp() {
     const chats = await db.listChats();
     res.json({
       fields: CHAT_FIELDS,
-      chats: await Promise.all(chats.map(async (c) => ({ ...c, effective: await effectiveSettings(c) }))),
+      chats: await Promise.all(
+        chats.map(async (c) => {
+          const k = await db.getKnowledge(c.jid);
+          const knowledge = k && { importedAt: k.importedAt || null, stats: k.stats || null, job: jobState(k) };
+          return { ...c, effective: await effectiveSettings(c), knowledge };
+        }),
+      ),
     });
   });
 
@@ -109,6 +116,53 @@ export function createApp() {
 
   api.get('/chats/:jid/messages', async (req, res) => {
     res.json({ messages: await db.recentMessages(req.params.jid, Math.min(Number(req.query.limit) || 50, 500)) });
+  });
+
+  api.get('/chats/:jid/knowledge', async (req, res) => {
+    const k = await db.getKnowledge(req.params.jid);
+    res.json({ knowledge: k && { ...k, job: jobState(k) } });
+  });
+
+  // Edits from the dashboard: the profile and samples are plain text the owner may correct.
+  api.put('/chats/:jid/knowledge', async (req, res) => {
+    const k = await db.getKnowledge(req.params.jid);
+    if (!k) return res.status(404).json({ error: 'עוד לא יובא צ׳אט לשיחה הזו' });
+    const profile = String(req.body?.profile ?? k.profile ?? '').slice(0, 60_000);
+    const samples = String(req.body?.samples ?? k.samples ?? '').slice(0, 30_000);
+    res.json({ knowledge: await db.setKnowledge(req.params.jid, { ...k, profile, samples }) });
+  });
+
+  api.delete('/chats/:jid/knowledge', async (req, res) => {
+    await db.clearKnowledge(req.params.jid);
+    res.json({ ok: true });
+  });
+
+  // Step 1 of an import: notes on one part of the export (the browser sends the parts one by one).
+  api.post('/knowledge/digest', async (req, res) => {
+    const { chatName, part, parts, from, to, text } = req.body || {};
+    if (!String(text || '').trim()) return res.status(400).json({ error: 'חלק ריק' });
+    try {
+      res.json(await digestPart({ chatName, part, parts, from, to, text: String(text) }));
+    } catch (err) {
+      log.warn({ err }, 'digest failed');
+      res.status(500).json({ error: describeError(err) });
+    }
+  });
+
+  // Step 2: merge the notes into a profile. Runs in the background; the dashboard polls the job.
+  api.post('/chats/:jid/knowledge', async (req, res) => {
+    const chat = await db.getChat(req.params.jid);
+    if (!chat) return res.status(404).json({ error: 'שיחה לא נמצאה' });
+    const { notes, recent, samples, stats } = req.body || {};
+    if (!Array.isArray(notes) || !notes.some((n) => n?.notes)) return res.status(400).json({ error: 'אין סיכומים לבנות מהם פרופיל' });
+    const job = buildKnowledge(chat, {
+      notes: notes.map((n) => ({ part: n.part, from: n.from, to: n.to, notes: String(n.notes || '') })),
+      recent: String(recent || ''),
+      samples: String(samples || '').slice(0, 30_000),
+      stats: stats || null,
+    });
+    waitUntil(job);
+    res.status(202).json({ started: true });
   });
 
   api.post('/groups/refresh', async (req, res) => {

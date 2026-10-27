@@ -19,7 +19,7 @@ const LABELS = {
     'claude-sonnet-5-5': 'Claude Sonnet 5.5 · מאוזן',
     'claude-haiku-5-5': 'Claude Haiku 5.5 · הכי זול ומהיר',
   },
-  action: { reply: 'עונה', react: 'מגיב באימוג׳י', silent: 'שותק', error: 'שגיאה', limited: 'הוגבל' },
+  action: { reply: 'עונה', react: 'מגיב באימוג׳י', silent: 'שותק', error: 'שגיאה', limited: 'הוגבל', knowledge: 'למד מייבוא צ׳אט' },
   status: {
     starting: 'מתחיל…',
     waking: 'מעיר את הסוכן…',
@@ -327,12 +327,166 @@ function chatCard(c) {
       </div>
     </div>
     <div class="messages" hidden></div>
+    ${knowledgeSection(c)}
   </div>`;
+}
+
+/* ---------- knowledge from a chat export ---------- */
+const imports = new Map(); // jid -> import in progress, survives re-rendering the cards
+const fmtDate = (ts) => new Date(ts).toLocaleDateString('he-IL');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function knowledgeSummary(k) {
+  if (k?.job?.status === 'building') return 'כותב פרופיל מהשיחה… זה לוקח כמה דקות.';
+  if (k?.job?.status === 'error') return `הייבוא האחרון נכשל: ${esc(k.job.error)}`;
+  if (k?.importedAt) {
+    const st = k.stats || {};
+    return `למד מ-${st.messages ?? '?'} הודעות (${esc(st.from)}–${esc(st.to)}) · יובא ב-${fmtDate(k.importedAt)}`;
+  }
+  return 'עוד לא יובא צ׳אט. בוואטסאפ: פרטי הקבוצה ← ייצוא צ׳אט ← בלי מדיה, ומעלים כאן את הקובץ (zip או txt).';
+}
+
+function knowledgeSection(c) {
+  const k = c.knowledge;
+  return `
+    <div class="knowledge">
+      <div class="knowledge-head">
+        <div>
+          <b>ידע על הקבוצה</b>
+          <div class="meta k-summary">${knowledgeSummary(k)}</div>
+        </div>
+        <div class="row">
+          <label class="btn">ייבוא צ׳אט<input type="file" accept=".txt,.zip,text/plain,application/zip" data-act="import-file" hidden></label>
+          ${k?.importedAt ? '<button class="btn" data-act="knowledge">צפייה ועריכה</button>' : ''}
+        </div>
+      </div>
+      <div class="k-progress" ${imports.has(c.jid) ? '' : 'hidden'}>${importView(imports.get(c.jid))}</div>
+      <div class="k-editor" hidden></div>
+    </div>`;
+}
+
+function importView(job) {
+  if (!job) return '';
+  if (job.phase === 'confirm') {
+    const st = job.plan.stats;
+    const people = st.participants.slice(0, 8).map((p) => esc(p.name)).join(', ');
+    const minutes = Math.ceil((job.plan.parts.length / 3) * 0.6 + 3);
+    return `
+      <div>נמצאו <b>${st.messages}</b> הודעות מ-${st.participants.length} משתתפים, ${esc(st.from)}–${esc(st.to)}.</div>
+      <div class="muted">${people}${st.participants.length > 8 ? '…' : ''}</div>
+      ${st.skippedBefore ? `<div class="muted">השיחה ארוכה, אז הסוכן ילמד מההודעות שאחרי ${esc(st.skippedBefore)}.</div>` : ''}
+      <div>זה ייקח בערך ${minutes} דקות ויעלה בערך $${st.cost.toFixed(2)} ב-API. צריך להשאיר את הדף פתוח עד שזה נגמר.</div>
+      <div class="row">
+        <button class="btn primary" data-act="import-start">התחלה</button>
+        <button class="btn" data-act="import-cancel">ביטול</button>
+      </div>`;
+  }
+  if (job.phase === 'digest') {
+    return `
+      <div>קורא את השיחה: ${job.done} מתוך ${job.total} חלקים</div>
+      <div class="progress"><div style="width:${Math.round((job.done / job.total) * 90)}%"></div></div>`;
+  }
+  if (job.phase === 'build') {
+    return `
+      <div>כותב את הפרופיל של הקבוצה… (כמה דקות)</div>
+      <div class="progress"><div style="width:95%"></div></div>`;
+  }
+  return `<div class="error">${esc(job.error)}</div><div class="row"><button class="btn" data-act="import-cancel">סגירה</button></div>`;
+}
+
+function renderImport(jid) {
+  const card = $$('.chat-card').find((el) => el.dataset.jid === jid);
+  if (!card) return;
+  const box = $('.k-progress', card);
+  box.innerHTML = importView(imports.get(jid));
+  box.hidden = !imports.has(jid);
+}
+
+async function prepareImport(jid, file) {
+  try {
+    const messages = ChatExport.parse(await ChatExport.readFile(file));
+    if (messages.length < 20) throw new Error('לא נמצאו הודעות בקובץ. צריך את הקובץ מ"ייצוא צ׳אט" של וואטסאפ.');
+    imports.set(jid, { phase: 'confirm', plan: ChatExport.plan(messages) });
+  } catch (err) {
+    imports.set(jid, { phase: 'error', error: err.message });
+  }
+  renderImport(jid);
+}
+
+async function runImport(jid) {
+  const job = imports.get(jid);
+  const { parts, recent, samples, stats } = job.plan;
+  const chatName = chats.find((c) => c.jid === jid)?.name || '';
+  Object.assign(job, { phase: 'digest', done: 0, total: parts.length });
+  renderImport(jid);
+  window.onbeforeunload = () => true;
+  try {
+    const notes = new Array(parts.length);
+    let next = 0;
+    const digestNext = async () => {
+      for (let i; (i = next++) < parts.length; ) {
+        const p = parts[i];
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const res = await api('/knowledge/digest', { method: 'POST', body: { chatName, parts: parts.length, ...p } });
+            notes[i] = { part: p.part, from: p.from, to: p.to, notes: res.notes };
+            break;
+          } catch (err) {
+            if (attempt >= 3) throw err;
+            await sleep(3000 * attempt);
+          }
+        }
+        job.done++;
+        renderImport(jid);
+      }
+    };
+    await Promise.all([digestNext(), digestNext(), digestNext()]);
+
+    job.phase = 'build';
+    renderImport(jid);
+    await api(`/chats/${encodeURIComponent(jid)}/knowledge`, { method: 'POST', body: { notes, recent, samples, stats } });
+    window.onbeforeunload = null; // the server finishes on its own from here
+    for (;;) {
+      await sleep(5000);
+      const { knowledge } = await api(`/chats/${encodeURIComponent(jid)}/knowledge`);
+      if (knowledge?.job?.status === 'error') throw new Error(knowledge.job.error);
+      if (knowledge && !knowledge.job) break;
+    }
+    imports.delete(jid);
+    toast('הסוכן למד את הקבוצה ✓');
+    loadChats();
+  } catch (err) {
+    Object.assign(job, { phase: 'error', error: `הייבוא נכשל: ${err.message}` });
+    renderImport(jid);
+  } finally {
+    window.onbeforeunload = null;
+  }
+}
+
+async function toggleKnowledgeEditor(card) {
+  const box = $('.k-editor', card);
+  if (!box.hidden) return (box.hidden = true);
+  const { knowledge } = await api(`/chats/${encodeURIComponent(card.dataset.jid)}/knowledge`);
+  box.innerHTML = `
+    <label>מה הסוכן יודע על הקבוצה <small>(אפשר לתקן ולהוסיף)</small>
+      <textarea name="profile" rows="16">${esc(knowledge?.profile || '')}</textarea>
+    </label>
+    <label>דוגמאות מהשיחה <small>(קטעים אמיתיים שמלמדים אותו איך אתם כותבים)</small>
+      <textarea name="samples" rows="8">${esc(knowledge?.samples || '')}</textarea>
+    </label>
+    <div class="row" style="justify-content:space-between">
+      <button class="btn danger" data-act="knowledge-clear">מחיקת הידע</button>
+      <button class="btn primary" data-act="knowledge-save">שמירה</button>
+    </div>`;
+  box.hidden = false;
 }
 
 function renderChats() {
   $('#chats-list').innerHTML = chats.map(chatCard).join('');
   $('#chats-empty').hidden = chats.length > 0;
+  const building = chats.some((c) => c.knowledge?.job?.status === 'building' && !imports.has(c.jid));
+  clearTimeout(renderChats.poll);
+  if (building) renderChats.poll = setTimeout(() => $('#tab-chats').classList.contains('active') && loadChats(), 10_000);
 }
 
 $('#chats-list').addEventListener('click', async (e) => {
@@ -340,9 +494,33 @@ $('#chats-list').addEventListener('click', async (e) => {
   if (!btn) return;
   const card = btn.closest('.chat-card');
   const jid = card.dataset.jid;
-  if (btn.dataset.act === 'save') {
+  const act = btn.dataset.act;
+  if (act === 'import-start') return runImport(jid);
+  if (act === 'import-cancel') {
+    imports.delete(jid);
+    return renderImport(jid);
+  }
+  if (act === 'knowledge') return toggleKnowledgeEditor(card).catch((err) => toast(err.message, true));
+  if (act === 'knowledge-save' || act === 'knowledge-clear') {
+    try {
+      const path = `/chats/${encodeURIComponent(jid)}/knowledge`;
+      if (act === 'knowledge-clear') {
+        if (!confirm('למחוק את כל מה שהסוכן למד על השיחה הזו?')) return;
+        await api(path, { method: 'DELETE' });
+        toast('הידע נמחק');
+        return loadChats();
+      }
+      const box = $('.k-editor', card);
+      await api(path, { method: 'PUT', body: { profile: $('[name=profile]', box).value, samples: $('[name=samples]', box).value } });
+      toast('נשמר ✓');
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  if (act === 'save') {
     const body = {};
-    for (const el of $$('select, textarea', card)) body[el.name] = el.value;
+    for (const el of $$('select, textarea[name=extraPrompt]', card)) body[el.name] = el.value;
     body.allowReactions = body.allowReactions === '' ? null : body.allowReactions === 'on';
     try {
       await api(`/chats/${encodeURIComponent(jid)}`, { method: 'PUT', body });
@@ -366,6 +544,14 @@ $('#chats-list').addEventListener('click', async (e) => {
     box.hidden = false;
     box.scrollTop = box.scrollHeight;
   }
+});
+
+$('#chats-list').addEventListener('change', (e) => {
+  if (e.target.dataset.act !== 'import-file' || !e.target.files[0]) return;
+  const jid = e.target.closest('.chat-card').dataset.jid;
+  if (imports.get(jid)?.phase === 'digest' || imports.get(jid)?.phase === 'build') return toast('כבר יש ייבוא שרץ', true);
+  prepareImport(jid, e.target.files[0]);
+  e.target.value = '';
 });
 
 $('#refresh-groups').addEventListener('click', async () => {
@@ -431,6 +617,7 @@ async function loadEvents() {
       if (ev.type === 'react') out = `<div class="out">← ${esc(d.emoji)}</div>`;
       if (ev.type === 'error') out = `<div class="out error">${esc(d.message)}</div>`;
       if (ev.type === 'limited') out = `<div class="out">${esc(d.reason)}</div>`;
+      if (ev.type === 'knowledge') out = `<div class="out">נקראו ${esc(d.messages)} הודעות</div>`;
       const u = d.usage ? ` · ${d.usage.input + d.usage.cacheRead + d.usage.cacheWrite}/${d.usage.output} טוקנים` : '';
       return `<div class="event">
         <div class="when">${fmtTime(ev.ts)}</div>

@@ -12,6 +12,7 @@ import { redis } from './redis.js';
  *   chat:<jid>:wa:<waId>      WhatsApp id -> message id (dedupe, expires)
  *   chat:<jid>:seen           last message id the agent already considered
  *   chat:<jid>:actions        sorted set of agent reply/react timestamps (rate limit)
+ *   chat:<jid>:knowledge      profile and style samples learned from an imported chat export
  *   events                    activity log, newest first (trimmed)
  *   pending                   hash: jid -> "1"/"0" turns handed over to the next worker session
  */
@@ -222,4 +223,27 @@ export async function listEvents(limit = 100) {
 
 export async function countBotActionsSince(chatJid, sinceTs) {
   return Number(await r().zcount(`chat:${chatJid}:actions`, sinceTs, '+inf'));
+}
+
+/* ---------- knowledge from an imported chat export (see knowledge.js) ---------- */
+
+const knowledgeCache = new Map(); // jid -> { value, at }; read on every turn
+
+export async function getKnowledge(jid) {
+  const cached = knowledgeCache.get(jid);
+  if (cached && Date.now() - cached.at < CHAT_CACHE_MS) return cached.value;
+  const value = parse(await r().get(`chat:${jid}:knowledge`), null);
+  knowledgeCache.set(jid, { value, at: Date.now() });
+  return value;
+}
+
+export async function setKnowledge(jid, knowledge) {
+  await r().set(`chat:${jid}:knowledge`, JSON.stringify(knowledge));
+  knowledgeCache.set(jid, { value: knowledge, at: Date.now() });
+  return knowledge;
+}
+
+export async function clearKnowledge(jid) {
+  await r().del(`chat:${jid}:knowledge`);
+  knowledgeCache.delete(jid);
 }

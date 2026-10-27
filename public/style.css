@@ -188,6 +188,16 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .chat-card .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 12px; }
 .chat-card h3 { font-size: 1rem; }
 .chat-card .meta { color: var(--muted); font-size: 0.8rem; }
+.knowledge { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; display: grid; gap: 10px; }
+.knowledge-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.knowledge-head .meta { margin-top: 2px; }
+.knowledge label.btn { display: inline-flex; align-items: center; }
+.k-progress { display: grid; gap: 8px; background: var(--surface-soft); border-radius: 10px; padding: 12px; font-size: 0.9rem; }
+.k-progress[hidden], .k-editor[hidden] { display: none; }
+.k-editor { display: grid; gap: 10px; }
+.k-editor textarea { font-size: 0.85rem; line-height: 1.55; }
+.progress { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); transition: width 0.3s; }
 .badge {
   display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 2px 8px;
   border-radius: 999px; background: var(--border); color: var(--muted); margin-inline-start: 6px;
@@ -205,6 +215,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
   margin-top: 12px; padding: 12px; border-radius: 12px; background: var(--bg);
   max-height: 360px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px;
 }
+.messages[hidden] { display: none; }
 .msg { max-width: 80%; padding: 6px 10px; border-radius: 10px; background: var(--surface); font-size: 0.9rem; align-self: flex-start; white-space: pre-wrap; }
 .msg.me { background: var(--bubble); align-self: flex-end; }
 .msg .who { display: block; font-size: 0.75rem; font-weight: 700; color: var(--accent-strong); }

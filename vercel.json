@@ -5,7 +5,7 @@
   "regions": ["iad1"],
   "functions": {
     "api/worker.js": { "maxDuration": 800 },
-    "api/app.js": { "maxDuration": 60 }
+    "api/app.js": { "maxDuration": 800 }
   },
   "crons": [{ "path": "/api/worker", "schedule": "* * * * *" }],
   "rewrites": [{ "source": "/api/v1/:path*", "destination": "/api/app" }]

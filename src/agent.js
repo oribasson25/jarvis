@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { kvGet, kvSet } from './db.js';
+import { getKnowledge, kvGet, kvSet } from './db.js';
 
 // A key saved from the dashboard wins over ANTHROPIC_API_KEY in the environment.
 const KEY_KV = 'anthropicApiKey';
@@ -15,7 +15,7 @@ async function getSavedKey() {
   return savedKey.value;
 }
 
-async function getClient() {
+export async function getClient() {
   const key = await getSavedKey();
   if (!client || clientKey !== key) {
     client = key ? new Anthropic({ apiKey: key }) : new Anthropic();
@@ -105,7 +105,30 @@ const timeFmt = new Intl.DateTimeFormat('en-GB', {
 });
 const nowFmt = new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short' });
 
-function buildSystem(s, chat) {
+function knowledgeBlocks(knowledge) {
+  let out = '';
+  if (knowledge?.profile) {
+    out += `
+<chat_knowledge>
+What you know about this chat and its people from its history before you joined. Use it the way an old friend would: naturally, without announcing that you know things or quoting this text. Names in the live chat are WhatsApp profile names and may differ from the names here; match them sensibly.
+
+${knowledge.profile}
+</chat_knowledge>
+`;
+  }
+  if (knowledge?.samples) {
+    out += `
+<style_examples>
+Real excerpts from this chat's history. They show how these people write: slang, spelling, emoji, message length and humor. Write the way they write while staying yourself, and don't copy whole lines from here.
+
+${knowledge.samples}
+</style_examples>
+`;
+  }
+  return out;
+}
+
+function buildSystem(s, chat, knowledge) {
   const where = chat?.is_group
     ? `the WhatsApp group "${chat.name || 'unnamed'}"`
     : `a private WhatsApp chat${chat?.name ? ` with ${chat.name}` : ''}`;
@@ -114,7 +137,7 @@ function buildSystem(s, chat) {
 <persona>
 ${s.persona}
 </persona>
-${s.extraPrompt ? `\n<chat_instructions>\n${s.extraPrompt}\n</chat_instructions>\n` : ''}
+${s.extraPrompt ? `\n<chat_instructions>\n${s.extraPrompt}\n</chat_instructions>\n` : ''}${knowledgeBlocks(knowledge)}
 How the conversation reaches you:
 - Each chat message is shown as "#<id> [<date time>] <sender>: <text>". Your own earlier messages are marked "(you)".
 - "↪ #<id>" or "↪ "<text>"" after the sender means the message replies to that earlier message.
@@ -190,10 +213,12 @@ export async function decide({ settings: s, chat, rows, newFromId, mode, address
   if (!content.length) content.push({ type: 'text', text: '(the chat is empty so far)' });
   content.push({ type: 'text', text: `---\n${turnInstructions({ s, mode, addressed, newRows })}` });
 
+  const knowledge = chat?.jid ? await getKnowledge(chat.jid) : null;
   const request = {
     model: s.model,
     max_tokens: 16000,
-    system: buildSystem(s, chat),
+    // cached on its own: with imported knowledge it is most of the prompt, and it rarely changes
+    system: [{ type: 'text', text: buildSystem(s, chat, knowledge), cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content }],
     output_config: { effort: s.effort, format: { type: 'json_schema', schema: DECISION_SCHEMA } },
   };
