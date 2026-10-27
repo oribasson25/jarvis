@@ -28,44 +28,45 @@ function turnMode(s) {
 
 /**
  * Wires WhatsApp messages to the agent: stores every message, decides when a chat needs a turn,
- * debounces bursts, and performs the agent's decision.
+ * debounces bursts, and performs the agent's decision. One router lives for one worker session;
+ * drain() hands unfinished turns to the next session.
  */
 export function createRouter(wa) {
   const pending = new Map(); // chatJid -> { timer, addressed }
   const busy = new Set();
   const rerun = new Map(); // chatJid -> addressed, for turns requested while one was running
   const seen = new Map(); // chatJid -> last message id the agent already considered
+  const inflight = new Set();
+  let draining = false;
+  let queue = Promise.resolve(); // messages are stored one at a time so ids follow arrival order
 
   wa.on('groups', (groups) => {
-    for (const g of groups) db.ensureChat(g.jid, { name: g.name, isGroup: true });
+    queue = queue.then(() => db.upsertGroupNames(groups)).catch((err) => log.error({ err }, 'group update failed'));
   });
 
   wa.on('message', (m) => {
-    try {
-      handle(m);
-    } catch (err) {
-      log.error({ err }, 'failed to handle message');
-    }
+    queue = queue.then(() => handle(m)).catch((err) => log.error({ err }, 'failed to handle message'));
   });
 
-  function handle(m) {
-    const known = db.getChat(m.chatJid);
-    const chat = db.ensureChat(m.chatJid, {
+  async function handle(m) {
+    const known = await db.getChat(m.chatJid);
+    const chat = await db.ensureChat(m.chatJid, {
       name: !m.isGroup && !m.fromMe ? m.senderName : null,
       isGroup: m.isGroup,
     });
     if (m.isGroup && !known?.name) wa.refreshGroup(m.chatJid);
 
-    const row = db.insertMessage(m);
+    const row = await db.insertMessage(m);
     if (!row || m.fromMe || !m.live || Date.now() - m.ts > STALE_MS) return;
-    if (!seen.has(m.chatJid)) seen.set(m.chatJid, row.id - 1);
+    if (!seen.has(m.chatJid)) seen.set(m.chatJid, (await db.getSeen(m.chatJid)) ?? row.id - 1);
 
-    const s = effectiveSettings(chat);
+    const s = await effectiveSettings(chat);
     const mode = turnMode(s);
     if (mode === 'off') return;
     const addressed = m.mentionsMe || m.repliesToMe || callsAgent(m.text, s);
     if (mode === 'mention' && !addressed) return;
 
+    if (draining) return db.markPending(m.chatJid, addressed);
     const p = pending.get(m.chatJid) || { addressed: false };
     p.addressed ||= addressed;
     clearTimeout(p.timer);
@@ -76,43 +77,48 @@ export function createRouter(wa) {
     pending.set(m.chatJid, p);
   }
 
-  async function runTurn(chatJid, addressed) {
+  function runTurn(chatJid, addressed) {
     if (busy.has(chatJid)) {
       rerun.set(chatJid, rerun.get(chatJid) || addressed);
       return;
     }
     busy.add(chatJid);
-    try {
-      await turn(chatJid, addressed);
-    } catch (err) {
-      log.error({ err, chatJid }, 'turn failed');
-      db.logEvent(chatJid, 'error', { message: describeError(err) });
-    } finally {
-      wa.setTyping(chatJid, false);
-      busy.delete(chatJid);
-      if (rerun.has(chatJid)) {
-        const again = rerun.get(chatJid);
-        rerun.delete(chatJid);
-        runTurn(chatJid, again);
+    const job = (async () => {
+      try {
+        await turn(chatJid, addressed);
+      } catch (err) {
+        log.error({ err, chatJid }, 'turn failed');
+        await db.logEvent(chatJid, 'error', { message: describeError(err) }).catch(() => {});
+      } finally {
+        wa.setTyping(chatJid, false);
+        busy.delete(chatJid);
+        if (rerun.has(chatJid)) {
+          const again = rerun.get(chatJid);
+          rerun.delete(chatJid);
+          runTurn(chatJid, again);
+        }
       }
-    }
+    })();
+    inflight.add(job);
+    job.finally(() => inflight.delete(job));
   }
 
   async function turn(chatJid, addressed) {
     if (wa.state.status !== 'open') return;
-    const chat = db.getChat(chatJid);
-    const s = effectiveSettings(chat);
+    const chat = await db.getChat(chatJid);
+    const s = await effectiveSettings(chat);
     const mode = turnMode(s);
     if (mode === 'off' || (mode === 'mention' && !addressed)) return;
 
-    if (s.maxActionsPerHour && db.countBotActionsSince(chatJid, Date.now() - 3600_000) >= s.maxActionsPerHour) {
-      db.logEvent(chatJid, 'limited', { reason: `הגיע למגבלה של ${s.maxActionsPerHour} תגובות בשעה` });
+    if (s.maxActionsPerHour && (await db.countBotActionsSince(chatJid, Date.now() - 3600_000)) >= s.maxActionsPerHour) {
+      await db.logEvent(chatJid, 'limited', { reason: `הגיע למגבלה של ${s.maxActionsPerHour} תגובות בשעה` });
       return;
     }
 
-    const rows = db.contextWindow(chatJid, s.contextMessages);
+    const rows = await db.contextWindow(chatJid, s.contextMessages);
     const lastId = rows.at(-1)?.id || 0;
-    const newFromId = (seen.get(chatJid) ?? lastId - 1) + 1;
+    if (!seen.has(chatJid)) seen.set(chatJid, (await db.getSeen(chatJid)) ?? lastId - 1);
+    const newFromId = seen.get(chatJid) + 1;
     const fresh = rows.filter((r) => r.id >= newFromId && !r.from_me);
     if (!fresh.length) return;
 
@@ -120,6 +126,7 @@ export function createRouter(wa) {
     const started = Date.now();
     const decision = await decide({ settings: s, chat, rows, newFromId, mode, addressed });
     seen.set(chatJid, lastId);
+    await db.setSeen(chatJid, lastId);
 
     if (decision.action === 'reply') {
       if (!addressed) {
@@ -128,7 +135,7 @@ export function createRouter(wa) {
       }
       const waId = await wa.sendText(chatJid, decision.text, decision.target);
       if (waId) {
-        db.insertMessage({
+        await db.insertMessage({
           chatJid,
           waId,
           senderJid: wa.state.me?.id,
@@ -143,7 +150,7 @@ export function createRouter(wa) {
       await wa.react(chatJid, decision.target, decision.emoji);
     }
 
-    db.logEvent(chatJid, decision.action, {
+    await db.logEvent(chatJid, decision.action, {
       text: decision.text || undefined,
       emoji: decision.emoji || undefined,
       target: decision.target?.id,
@@ -157,41 +164,64 @@ export function createRouter(wa) {
     });
   }
 
-  /** Dry run for the dashboard playground: what would the agent do with this message? Sends nothing. */
-  async function simulate({ chatJid, senderName, text, addressed, mode }) {
-    const chat = chatJid ? db.getChat(chatJid) : null;
-    const s = effectiveSettings(chat || { is_group: true, settings: {} });
-    const rows = chatJid ? db.contextWindow(chatJid, s.contextMessages) : [];
-    const fake = {
-      id: (rows.at(-1)?.id || 0) + 1,
-      wa_id: '__playground__',
-      sender_name: senderName || 'חבר',
-      text,
-      from_me: 0,
-      ts: Date.now(),
-    };
-    rows.push(fake);
-    const useMode = mode || s.mode;
-    const isAddressed = !!addressed || callsAgent(text, s);
-    if ((useMode === 'mention' || useMode === 'off') && !isAddressed) {
-      return { action: 'silent', skipped: true, addressed: false };
-    }
-    const started = Date.now();
-    const decision = await decide({
-      settings: s,
-      chat: chat || { name: 'מגרש ניסויים', is_group: true },
-      rows,
-      newFromId: fake.id,
-      mode: useMode === 'off' ? 'mention' : useMode,
-      addressed: isAddressed,
-    });
-    return {
-      ...decision,
-      target: decision.target ? { id: decision.target.id, text: decision.target.text } : null,
-      addressed: isAddressed,
-      ms: Date.now() - started,
-    };
+  /** Turns that the previous session handed over. */
+  async function resumePending() {
+    for (const { jid, addressed } of await db.takePending()) runTurn(jid, addressed);
   }
 
-  return { simulate };
+  /**
+   * End of session: run debounced turns now, wait up to `timeoutMs` for running ones, and hand
+   * anything unfinished to the next session.
+   */
+  async function drain(timeoutMs) {
+    draining = true;
+    for (const [jid, p] of pending) {
+      clearTimeout(p.timer);
+      pending.delete(jid);
+      runTurn(jid, p.addressed);
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (inflight.size && Date.now() < deadline) await Promise.race([...inflight, sleep(500)]);
+    await queue;
+    for (const jid of busy) await db.markPending(jid, rerun.get(jid) ?? false);
+    for (const [jid, addressed] of rerun) if (!busy.has(jid)) await db.markPending(jid, addressed);
+  }
+
+  return { resumePending, drain };
+}
+
+/** Dry run for the dashboard playground: what would the agent do with this message? Sends nothing. */
+export async function simulate({ chatJid, senderName, text, addressed, mode }) {
+  const chat = chatJid ? await db.getChat(chatJid) : null;
+  const s = await effectiveSettings(chat || { is_group: true, settings: {} });
+  const rows = chatJid ? await db.contextWindow(chatJid, s.contextMessages) : [];
+  const fake = {
+    id: (rows.at(-1)?.id || 0) + 1,
+    wa_id: '__playground__',
+    sender_name: senderName || 'חבר',
+    text,
+    from_me: 0,
+    ts: Date.now(),
+  };
+  rows.push(fake);
+  const useMode = mode || s.mode;
+  const isAddressed = !!addressed || callsAgent(text, s);
+  if ((useMode === 'mention' || useMode === 'off') && !isAddressed) {
+    return { action: 'silent', skipped: true, addressed: false };
+  }
+  const started = Date.now();
+  const decision = await decide({
+    settings: s,
+    chat: chat || { name: 'מגרש ניסויים', is_group: true },
+    rows,
+    newFromId: fake.id,
+    mode: useMode === 'off' ? 'mention' : useMode,
+    addressed: isAddressed,
+  });
+  return {
+    ...decision,
+    target: decision.target ? { id: decision.target.id, text: decision.target.text } : null,
+    addressed: isAddressed,
+    ms: Date.now() - started,
+  };
 }

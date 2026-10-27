@@ -1,86 +1,29 @@
-import fs from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
-import { config } from './config.js';
+import { redis } from './redis.js';
 
-fs.mkdirSync(config.dataDir, { recursive: true });
+/*
+ * Key layout (all values are strings, JSON where structured):
+ *   kv:<name>                 settings and other small values
+ *   chats                     hash: jid -> chat JSON
+ *   msg:seq                   global message id counter
+ *   msg:<id>                  message JSON (expires)
+ *   chat:<jid>:msgs           list of message ids, oldest first (trimmed)
+ *   chat:<jid>:count          messages ever stored in the chat (absolute positions)
+ *   chat:<jid>:last           timestamp of the newest message
+ *   chat:<jid>:wa:<waId>      WhatsApp id -> message id (dedupe, expires)
+ *   chat:<jid>:seen           last message id the agent already considered
+ *   chat:<jid>:actions        sorted set of agent reply/react timestamps (rate limit)
+ *   events                    activity log, newest first (trimmed)
+ *   pending                   hash: jid -> "1"/"0" turns handed over to the next worker session
+ */
 
-const db = new DatabaseSync(config.dbPath);
-db.exec(`
-  PRAGMA journal_mode = WAL;
+const MSG_TTL = 30 * 24 * 3600;
+const KEEP_IDS = 2000;
+const KEEP_EVENTS = 500;
+const CHAT_CACHE_MS = 30_000;
 
-  CREATE TABLE IF NOT EXISTS kv (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS chats (
-    jid        TEXT PRIMARY KEY,
-    name       TEXT,
-    is_group   INTEGER NOT NULL,
-    settings   TEXT NOT NULL DEFAULT '{}',
-    updated_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_jid     TEXT NOT NULL,
-    wa_id        TEXT NOT NULL,
-    sender_jid   TEXT,
-    sender_name  TEXT,
-    text         TEXT NOT NULL,
-    from_me      INTEGER NOT NULL DEFAULT 0,
-    quoted_wa_id TEXT,
-    quoted_text  TEXT,
-    ts           INTEGER NOT NULL,
-    UNIQUE (chat_jid, wa_id)
-  );
-  CREATE INDEX IF NOT EXISTS messages_chat ON messages (chat_jid, id);
-
-  CREATE TABLE IF NOT EXISTS events (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts       INTEGER NOT NULL,
-    chat_jid TEXT,
-    type     TEXT NOT NULL,
-    detail   TEXT NOT NULL DEFAULT '{}'
-  );
-`);
-
-const stmts = {
-  kvGet: db.prepare('SELECT value FROM kv WHERE key = ?'),
-  kvSet: db.prepare('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
-
-  chatGet: db.prepare('SELECT * FROM chats WHERE jid = ?'),
-  chatInsert: db.prepare(
-    'INSERT INTO chats (jid, name, is_group, settings, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(jid) DO NOTHING',
-  ),
-  chatRename: db.prepare('UPDATE chats SET name = ? WHERE jid = ?'),
-  chatSetSettings: db.prepare('UPDATE chats SET settings = ?, updated_at = ? WHERE jid = ?'),
-  chatList: db.prepare(`
-    SELECT c.*,
-           (SELECT MAX(ts) FROM messages m WHERE m.chat_jid = c.jid) AS last_ts,
-           (SELECT COUNT(*) FROM messages m WHERE m.chat_jid = c.jid) AS message_count
-    FROM chats c
-    ORDER BY c.is_group DESC, last_ts DESC NULLS LAST, c.name
-  `),
-
-  msgInsert: db.prepare(`
-    INSERT INTO messages (chat_jid, wa_id, sender_jid, sender_name, text, from_me, quoted_wa_id, quoted_text, ts)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(chat_jid, wa_id) DO NOTHING
-  `),
-  msgById: db.prepare('SELECT * FROM messages WHERE id = ?'),
-  msgByWaId: db.prepare('SELECT * FROM messages WHERE chat_jid = ? AND wa_id = ?'),
-  msgCount: db.prepare('SELECT COUNT(*) AS n FROM messages WHERE chat_jid = ?'),
-  msgWindow: db.prepare('SELECT * FROM messages WHERE chat_jid = ? ORDER BY id LIMIT -1 OFFSET ?'),
-  msgRecent: db.prepare('SELECT * FROM messages WHERE chat_jid = ? ORDER BY id DESC LIMIT ?'),
-  msgLastId: db.prepare('SELECT MAX(id) AS id FROM messages WHERE chat_jid = ?'),
-
-  eventInsert: db.prepare('INSERT INTO events (ts, chat_jid, type, detail) VALUES (?, ?, ?, ?)'),
-  eventList: db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?'),
-  eventCountSince: db.prepare('SELECT COUNT(*) AS n FROM events WHERE chat_jid = ? AND type IN (?, ?) AND ts >= ?'),
-};
-
+const r = () => redis();
 const parse = (s, fallback) => {
+  if (s == null) return fallback;
   try {
     return JSON.parse(s);
   } catch {
@@ -88,89 +31,195 @@ const parse = (s, fallback) => {
   }
 };
 
-export function kvGet(key, fallback) {
-  const row = stmts.kvGet.get(key);
-  return row ? parse(row.value, fallback) : fallback;
+export async function kvGet(key, fallback) {
+  return parse(await r().get(`kv:${key}`), fallback);
 }
 
-export function kvSet(key, value) {
-  stmts.kvSet.run(key, JSON.stringify(value));
+export async function kvSet(key, value) {
+  await r().set(`kv:${key}`, JSON.stringify(value));
 }
 
-function chatRow(row) {
-  return row && { ...row, is_group: !!row.is_group, settings: parse(row.settings, {}) };
+/* ---------- chats ---------- */
+
+const chatCache = new Map(); // jid -> { chat, at }
+
+export async function getChat(jid) {
+  return parse(await r().hget('chats', jid), null);
 }
 
-export function getChat(jid) {
-  return chatRow(stmts.chatGet.get(jid));
+async function writeChat(chat) {
+  await r().hset('chats', { [chat.jid]: JSON.stringify(chat) });
+  chatCache.set(chat.jid, { chat, at: Date.now() });
+  return chat;
 }
 
-/** Creates the chat if missing (with the given initial settings) and keeps its name fresh. */
-export function ensureChat(jid, { name, isGroup, settings }) {
-  stmts.chatInsert.run(jid, name || null, isGroup ? 1 : 0, JSON.stringify(settings || {}), Date.now());
-  if (name) stmts.chatRename.run(name, jid);
-  return getChat(jid);
+/** Creates the chat if missing and keeps its name fresh. Cached briefly: called for every message. */
+export async function ensureChat(jid, { name, isGroup }) {
+  const cached = chatCache.get(jid);
+  if (cached && Date.now() - cached.at < CHAT_CACHE_MS && (!name || cached.chat.name === name)) return cached.chat;
+  const chat = await getChat(jid);
+  if (chat && (!name || chat.name === name)) {
+    chatCache.set(jid, { chat, at: Date.now() });
+    return chat;
+  }
+  return writeChat({
+    jid,
+    name: name || chat?.name || null,
+    is_group: chat?.is_group ?? !!isGroup,
+    settings: chat?.settings || {},
+    updated_at: Date.now(),
+  });
 }
 
-export function setChatSettings(jid, settings) {
-  stmts.chatSetSettings.run(JSON.stringify(settings), Date.now(), jid);
-  return getChat(jid);
+export async function upsertGroupNames(groups) {
+  const all = (await r().hgetall('chats')) || {};
+  const updates = {};
+  for (const g of groups) {
+    const cur = parse(all[g.jid], null);
+    if (cur && cur.name === g.name) continue;
+    updates[g.jid] = JSON.stringify({
+      jid: g.jid,
+      name: g.name,
+      is_group: true,
+      settings: cur?.settings || {},
+      updated_at: Date.now(),
+    });
+  }
+  if (Object.keys(updates).length) await r().hset('chats', updates);
+  chatCache.clear();
 }
 
-export function listChats() {
-  return stmts.chatList.all().map(chatRow);
+export async function setChatSettings(jid, settings) {
+  const chat = await getChat(jid);
+  if (!chat) return null;
+  return writeChat({ ...chat, settings, updated_at: Date.now() });
 }
+
+export async function listChats() {
+  const chats = Object.values((await r().hgetall('chats')) || {})
+    .map((s) => parse(s, null))
+    .filter(Boolean);
+  if (!chats.length) return [];
+  const pipe = r().pipeline();
+  for (const c of chats) pipe.get(`chat:${c.jid}:count`).get(`chat:${c.jid}:last`);
+  const res = await pipe.exec();
+  chats.forEach((c, i) => {
+    c.message_count = Number(res[2 * i] || 0);
+    c.last_ts = res[2 * i + 1] ? Number(res[2 * i + 1]) : null;
+  });
+  return chats.sort(
+    (a, b) =>
+      Number(b.is_group) - Number(a.is_group) ||
+      (b.last_ts || 0) - (a.last_ts || 0) ||
+      String(a.name).localeCompare(String(b.name)),
+  );
+}
+
+/* ---------- messages ---------- */
 
 /** Returns the stored row, or null when this WhatsApp message id was already stored. */
-export function insertMessage(m) {
-  const res = stmts.msgInsert.run(
-    m.chatJid,
-    m.waId,
-    m.senderJid || null,
-    m.senderName || null,
-    m.text,
-    m.fromMe ? 1 : 0,
-    m.quotedWaId || null,
-    m.quotedText || null,
-    m.ts,
-  );
-  return res.changes ? stmts.msgById.get(res.lastInsertRowid) : null;
+export async function insertMessage(m) {
+  const id = await r().incr('msg:seq');
+  const claimed = await r().set(`chat:${m.chatJid}:wa:${m.waId}`, String(id), { nx: true, ex: MSG_TTL });
+  if (!claimed) return null;
+  const row = {
+    id,
+    chat_jid: m.chatJid,
+    wa_id: m.waId,
+    sender_jid: m.senderJid || null,
+    sender_name: m.senderName || null,
+    text: m.text,
+    from_me: m.fromMe ? 1 : 0,
+    quoted_wa_id: m.quotedWaId || null,
+    quoted_text: m.quotedText || null,
+    ts: m.ts,
+  };
+  const key = `chat:${m.chatJid}`;
+  await r()
+    .pipeline()
+    .set(`msg:${id}`, JSON.stringify(row), { ex: MSG_TTL })
+    .rpush(`${key}:msgs`, String(id))
+    .incr(`${key}:count`)
+    .set(`${key}:last`, String(row.ts))
+    .ltrim(`${key}:msgs`, -KEEP_IDS, -1)
+    .exec();
+  return row;
 }
 
-export function getMessage(id) {
-  return stmts.msgById.get(id);
+export async function getMessage(id) {
+  return parse(await r().get(`msg:${id}`), null);
 }
 
-export function getMessageByWaId(chatJid, waId) {
-  return stmts.msgByWaId.get(chatJid, waId);
+export async function getMessageByWaId(chatJid, waId) {
+  const id = await r().get(`chat:${chatJid}:wa:${waId}`);
+  return id ? getMessage(id) : null;
 }
 
-export function lastMessageId(chatJid) {
-  return stmts.msgLastId.get(chatJid).id || 0;
+async function rowsByIds(ids) {
+  if (!ids.length) return [];
+  const values = await r().mget(...ids.map((id) => `msg:${id}`));
+  return values.map((v) => parse(v, null)).filter(Boolean);
 }
 
 /**
  * The last ~`size` messages of a chat. The window start only moves in steps of
  * `step` messages, so consecutive requests share a stable prefix (prompt cache hits).
  */
-export function contextWindow(chatJid, size, step = 20) {
-  const total = stmts.msgCount.get(chatJid).n;
+export async function contextWindow(chatJid, size, step = 20) {
+  const key = `chat:${chatJid}`;
+  const [countRaw, len] = await r().pipeline().get(`${key}:count`).llen(`${key}:msgs`).exec();
+  const total = Number(countRaw || 0);
   const start = Math.max(0, Math.ceil((total - size) / step) * step);
-  return stmts.msgWindow.all(chatJid, start);
+  const trimmed = Math.max(0, total - Number(len)); // ids already dropped from the list head
+  return rowsByIds(await r().lrange(`${key}:msgs`, Math.max(0, start - trimmed), -1));
 }
 
-export function recentMessages(chatJid, limit) {
-  return stmts.msgRecent.all(chatJid, limit).reverse();
+export async function recentMessages(chatJid, limit) {
+  return rowsByIds(await r().lrange(`chat:${chatJid}:msgs`, -limit, -1));
 }
 
-export function logEvent(chatJid, type, detail = {}) {
-  stmts.eventInsert.run(Date.now(), chatJid || null, type, JSON.stringify(detail));
+export async function getSeen(chatJid) {
+  const v = await r().get(`chat:${chatJid}:seen`);
+  return v == null ? null : Number(v);
 }
 
-export function listEvents(limit = 100) {
-  return stmts.eventList.all(limit).map((e) => ({ ...e, detail: parse(e.detail, {}) }));
+export async function setSeen(chatJid, id) {
+  await r().set(`chat:${chatJid}:seen`, String(id));
 }
 
-export function countBotActionsSince(chatJid, sinceTs) {
-  return stmts.eventCountSince.get(chatJid, 'reply', 'react', sinceTs).n;
+/* ---------- turns handed between worker sessions ---------- */
+
+export async function markPending(chatJid, addressed) {
+  const prev = await r().hget('pending', chatJid);
+  await r().hset('pending', { [chatJid]: addressed || prev === '1' ? '1' : '0' });
+}
+
+export async function takePending() {
+  const all = await r().hgetall('pending');
+  if (!all) return [];
+  await r().del('pending');
+  return Object.entries(all).map(([jid, a]) => ({ jid, addressed: a === '1' }));
+}
+
+/* ---------- activity ---------- */
+
+export async function logEvent(chatJid, type, detail = {}) {
+  const ts = Date.now();
+  const pipe = r()
+    .pipeline()
+    .lpush('events', JSON.stringify({ ts, chat_jid: chatJid || null, type, detail }))
+    .ltrim('events', 0, KEEP_EVENTS - 1);
+  if (chatJid && (type === 'reply' || type === 'react')) {
+    const key = `chat:${chatJid}:actions`;
+    pipe.zadd(key, { score: ts, member: `${ts}:${Math.random()}` }).zremrangebyscore(key, 0, ts - 2 * 3600_000);
+  }
+  await pipe.exec();
+}
+
+export async function listEvents(limit = 100) {
+  return (await r().lrange('events', 0, limit - 1)).map((s) => parse(s, null)).filter(Boolean);
+}
+
+export async function countBotActionsSince(chatJid, sinceTs) {
+  return Number(await r().zcount(`chat:${chatJid}:actions`, sinceTs, '+inf'));
 }

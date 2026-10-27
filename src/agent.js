@@ -3,11 +3,20 @@ import { kvGet, kvSet } from './db.js';
 
 // A key saved from the dashboard wins over ANTHROPIC_API_KEY in the environment.
 const KEY_KV = 'anthropicApiKey';
+const KEY_CACHE_MS = 15_000;
+let savedKey = null; // { value, at }
 let client;
 let clientKey;
 
-function getClient() {
-  const key = kvGet(KEY_KV, '');
+async function getSavedKey() {
+  if (!savedKey || Date.now() - savedKey.at > KEY_CACHE_MS) {
+    savedKey = { value: await kvGet(KEY_KV, ''), at: Date.now() };
+  }
+  return savedKey.value;
+}
+
+async function getClient() {
+  const key = await getSavedKey();
   if (!client || clientKey !== key) {
     client = key ? new Anthropic({ apiKey: key }) : new Anthropic();
     clientKey = key;
@@ -18,8 +27,8 @@ function getClient() {
 const mask = (key) => `${key.slice(0, 10)}…${key.slice(-4)}`;
 
 /** What the dashboard may know about the key: where it comes from and a masked preview, never the key. */
-export function apiKeyInfo() {
-  const saved = kvGet(KEY_KV, '');
+export async function apiKeyInfo() {
+  const saved = await getSavedKey();
   const env = process.env.ANTHROPIC_API_KEY || '';
   const source = saved ? 'dashboard' : env ? 'env' : process.env.ANTHROPIC_AUTH_TOKEN ? 'env-token' : null;
   return { configured: !!source, source, masked: saved || env ? mask(saved || env) : null };
@@ -35,16 +44,21 @@ export async function saveApiKey(key, model) {
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError) throw new Error('Anthropic דחו את המפתח. בדקו שהעתקתם אותו במלואו');
     if (err instanceof Anthropic.PermissionDeniedError) throw new Error('למפתח הזה אין הרשאה להשתמש ב-API');
-    kvSet(KEY_KV, key);
+    await storeKey(key);
     if (err instanceof Anthropic.NotFoundError) return `המפתח נשמר, אבל המודל ${model} לא זמין בחשבון הזה`;
     return 'המפתח נשמר, אבל לא הצלחתי לבדוק אותו מול Anthropic';
   }
-  kvSet(KEY_KV, key);
+  await storeKey(key);
   return null;
 }
 
-export function clearApiKey() {
-  kvSet(KEY_KV, '');
+async function storeKey(key) {
+  await kvSet(KEY_KV, key);
+  savedKey = { value: key, at: Date.now() };
+}
+
+export async function clearApiKey() {
+  await storeKey('');
 }
 
 // Models that accept server-side refusal fallbacks on the Claude API.
@@ -188,7 +202,7 @@ export async function decide({ settings: s, chat, rows, newFromId, mode, address
     request.fallbacks = 'default';
   }
 
-  const response = await getClient().beta.messages.create(request);
+  const response = await (await getClient()).beta.messages.create(request);
   const meta = {
     model: response.model,
     stopReason: response.stop_reason,

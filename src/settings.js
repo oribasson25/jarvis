@@ -29,17 +29,26 @@ export const DEFAULTS = {
 /** Fields a single chat may override. */
 export const CHAT_FIELDS = ['mode', 'extraPrompt', 'engagement', 'replyLength', 'allowReactions'];
 
-export function getSettings() {
-  return { ...DEFAULTS, ...kvGet('settings', {}) };
+// The worker reads settings on every message; dashboard edits reach it within this window.
+const CACHE_MS = 15_000;
+let cache = null;
+
+export async function getSettings() {
+  if (cache && Date.now() - cache.at < CACHE_MS) return cache.value;
+  const value = { ...DEFAULTS, ...(await kvGet('settings', {})) };
+  cache = { value, at: Date.now() };
+  return value;
 }
 
-export function updateSettings(patch) {
-  const next = { ...getSettings() };
+export async function updateSettings(patch) {
+  cache = null;
+  const next = { ...(await getSettings()) };
   for (const key of Object.keys(DEFAULTS)) {
     if (patch[key] === undefined) continue;
     next[key] = coerce(key, patch[key], DEFAULTS[key]);
   }
-  kvSet('settings', next);
+  await kvSet('settings', next);
+  cache = { value: next, at: Date.now() };
   return next;
 }
 
@@ -64,8 +73,8 @@ export function sanitizeChatSettings(patch, current = {}) {
 }
 
 /** Global settings merged with one chat's overrides. */
-export function effectiveSettings(chat) {
-  const global = getSettings();
+export async function effectiveSettings(chat) {
+  const global = await getSettings();
   const fallbackMode = chat?.is_group ? global.defaultGroupMode : global.defaultDmMode;
   return { ...global, mode: fallbackMode, extraPrompt: '', ...(chat?.settings || {}) };
 }

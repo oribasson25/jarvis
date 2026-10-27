@@ -210,6 +210,23 @@
     </section>
   </main>
 
+  <div id="login" class="overlay" hidden>
+    <form id="login-form" class="card login-card">
+      <h2>כניסה לדשבורד</h2>
+      <p id="login-error" class="error" hidden>סיסמה שגויה</p>
+      <input name="pass" type="password" placeholder="סיסמה" autocomplete="current-password">
+      <button class="btn primary" type="submit">כניסה</button>
+    </form>
+  </div>
+
+  <div id="blocker" class="overlay" hidden>
+    <div class="card login-card">
+      <h2>חסרה הגדרה</h2>
+      <p id="blocker-text"></p>
+      <p class="muted">ב-Vercel: Settings ← Environment Variables, מוסיפים <code>DASHBOARD_PASSWORD</code> ועושים Redeploy.</p>
+    </div>
+  </div>
+
   <div id="toast" class="toast" hidden></div>
   <script src="app.js"></script>
 </body>

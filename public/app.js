@@ -22,6 +22,7 @@ const LABELS = {
   action: { reply: 'עונה', react: 'מגיב באימוג׳י', silent: 'שותק', error: 'שגיאה', limited: 'הוגבל' },
   status: {
     starting: 'מתחיל…',
+    waking: 'מעיר את הסוכן…',
     connecting: 'מתחבר…',
     qr: 'ממתין לסריקה',
     open: 'מחובר',
@@ -36,15 +37,58 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+/* ---------- API + dashboard password ---------- */
+const API = '/api/v1';
+let password = '';
+try {
+  password = localStorage.getItem('dashPass') || '';
+} catch {}
+let loginPromise = null;
+
+const basic = (pass) => 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode(':' + pass)));
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(API + path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(password && { Authorization: basic(password) }) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && data.code === 'auth') {
+    await askPassword(!!password);
+    return api(path, opts);
+  }
+  if (res.status === 503 && data.code === 'no_password') showBlocker(data.error);
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
+}
+
+/** Shows the login screen once, however many requests are waiting for it. */
+function askPassword(wrong) {
+  loginPromise ??= new Promise((resolve) => {
+    const box = $('#login');
+    box.hidden = false;
+    $('#login-error').hidden = !wrong;
+    const form = $('#login-form');
+    form.pass.value = '';
+    form.pass.focus();
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      password = form.pass.value;
+      try {
+        localStorage.setItem('dashPass', password);
+      } catch {}
+      box.hidden = true;
+      loginPromise = null;
+      resolve();
+    };
+  });
+  return loginPromise;
+}
+
+function showBlocker(text) {
+  $('#blocker-text').textContent = text;
+  $('#blocker').hidden = false;
 }
 
 function toast(text, bad = false) {
@@ -75,7 +119,9 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => showTab(t.dataset.ta
 /* ---------- status / connection ---------- */
 async function refreshStatus() {
   try {
-    const { whatsapp: wa, apiKey } = await api('/api/status');
+    const { whatsapp: wa, apiKey } = await api('/status');
+    $('#wait-text').textContent =
+      wa.status === 'waking' ? 'מעיר את הסוכן, זה לוקח עד דקה…' : 'מתחבר לוואטסאפ…';
     renderApiKey(apiKey);
     const pill = $('#wa-pill');
     pill.textContent = `וואטסאפ: ${LABELS.status[wa.status] || wa.status}`;
@@ -123,7 +169,7 @@ $('#apikey-form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'בודק…';
   try {
-    const { apiKey, warning } = await api('/api/apikey', { method: 'PUT', body: { key: form.key.value } });
+    const { apiKey, warning } = await api('/apikey', { method: 'PUT', body: { key: form.key.value } });
     form.key.value = '';
     renderApiKey(apiKey);
     toast(warning || 'המפתח תקין ונשמר ✓', !!warning);
@@ -137,7 +183,7 @@ $('#apikey-form').addEventListener('submit', async (e) => {
 
 $('#apikey-clear').addEventListener('click', async () => {
   if (!confirm('להסיר את המפתח מהדשבורד?')) return;
-  const { apiKey } = await api('/api/apikey', { method: 'DELETE' });
+  const { apiKey } = await api('/apikey', { method: 'DELETE' });
   renderApiKey(apiKey);
   toast('המפתח הוסר');
 });
@@ -150,8 +196,9 @@ $('#api-warning').addEventListener('click', () => {
 $('#pair-btn').addEventListener('click', async () => {
   const btn = $('#pair-btn');
   btn.disabled = true;
+  btn.textContent = 'מבקש קוד…';
   try {
-    const { code } = await api('/api/pair', { method: 'POST', body: { phone: $('#pair-phone').value } });
+    const { code } = await api('/pair', { method: 'POST', body: { phone: $('#pair-phone').value } });
     const el = $('#pair-code');
     el.textContent = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
     el.hidden = false;
@@ -159,13 +206,19 @@ $('#pair-btn').addEventListener('click', async () => {
     toast(err.message, true);
   } finally {
     btn.disabled = false;
+    btn.textContent = 'קבלת קוד';
   }
 });
 
 $('#logout-btn').addEventListener('click', async () => {
   if (!confirm('לנתק את הסוכן מוואטסאפ? יהיה צריך לסרוק QR מחדש.')) return;
-  await api('/api/logout', { method: 'POST' });
-  toast('נותק');
+  toast('מנתק… (עד חצי דקה)');
+  try {
+    await api('/logout', { method: 'POST' });
+    toast('נותק');
+  } catch (err) {
+    toast(err.message, true);
+  }
   refreshStatus();
 });
 
@@ -177,7 +230,7 @@ function fillSelect(select, values, labels, withDefault) {
 }
 
 async function loadSettings() {
-  const { settings, options } = await api('/api/settings');
+  const { settings, options } = await api('/settings');
   OPTIONS = options;
   const form = $('#settings-form');
   for (const select of $$('select[data-options]', form)) {
@@ -208,7 +261,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
     body[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
   }
   try {
-    await api('/api/settings', { method: 'PUT', body });
+    await api('/settings', { method: 'PUT', body });
     toast('נשמר ✓');
     loadSettings();
   } catch (err) {
@@ -218,7 +271,7 @@ $('#settings-form').addEventListener('submit', async (e) => {
 
 /* ---------- chats ---------- */
 async function loadChats() {
-  const data = await api('/api/chats');
+  const data = await api('/chats');
   chats = data.chats;
   renderChats();
   const play = $('#play-chat');
@@ -292,7 +345,7 @@ $('#chats-list').addEventListener('click', async (e) => {
     for (const el of $$('select, textarea', card)) body[el.name] = el.value;
     body.allowReactions = body.allowReactions === '' ? null : body.allowReactions === 'on';
     try {
-      await api(`/api/chats/${encodeURIComponent(jid)}`, { method: 'PUT', body });
+      await api(`/chats/${encodeURIComponent(jid)}`, { method: 'PUT', body });
       toast('נשמר ✓');
       loadChats();
     } catch (err) {
@@ -302,7 +355,7 @@ $('#chats-list').addEventListener('click', async (e) => {
   if (btn.dataset.act === 'messages') {
     const box = $('.messages', card);
     if (!box.hidden) return (box.hidden = true);
-    const { messages } = await api(`/api/chats/${encodeURIComponent(jid)}/messages?limit=80`);
+    const { messages } = await api(`/chats/${encodeURIComponent(jid)}/messages?limit=80`);
     box.innerHTML = messages.length
       ? messages
           .map(
@@ -317,8 +370,9 @@ $('#chats-list').addEventListener('click', async (e) => {
 
 $('#refresh-groups').addEventListener('click', async () => {
   try {
-    const { groups } = await api('/api/groups/refresh', { method: 'POST' });
-    toast(`נמצאו ${groups.length} קבוצות`);
+    toast('מרענן… (עד חצי דקה)');
+    const { groups } = await api('/groups/refresh', { method: 'POST' });
+    toast(`נמצאו ${groups} קבוצות`);
     loadChats();
   } catch (err) {
     toast(err.message, true);
@@ -334,7 +388,7 @@ $('#play-form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   out.innerHTML = '<h2>תוצאה</h2><p class="muted"><span class="spinner"></span> הסוכן חושב…</p>';
   try {
-    const r = await api('/api/playground', {
+    const r = await api('/playground', {
       method: 'POST',
       body: {
         chatJid: f.chatJid.value,
@@ -367,7 +421,7 @@ $('#play-form').addEventListener('submit', async (e) => {
 
 /* ---------- activity ---------- */
 async function loadEvents() {
-  const [{ events }] = await Promise.all([api('/api/events?limit=150'), chats.length ? null : loadChats()]);
+  const [{ events }] = await Promise.all([api('/events?limit=150'), chats.length ? null : loadChats()]);
   const names = new Map(chats.map((c) => [c.jid, c.name || c.jid]));
   $('#events').innerHTML = events
     .map((ev) => {

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "fluid": true,
+  "regions": ["iad1"],
+  "functions": {
+    "api/worker.js": { "maxDuration": 800 },
+    "api/app.js": { "maxDuration": 60 }
+  },
+  "crons": [{ "path": "/api/worker", "schedule": "* * * * *" }],
+  "rewrites": [{ "source": "/api/v1/:path*", "destination": "/api/app" }]
+}

@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import QRCode from 'qrcode';
 import makeWASocket, {
@@ -7,10 +6,10 @@ import makeWASocket, {
   getContentType,
   isJidGroup,
   jidNormalizedUser,
+  makeCacheableSignalKeyStore,
   normalizeMessageContent,
-  useMultiFileAuthState,
 } from 'baileys';
-import { config } from './config.js';
+import { clearAuth, useRedisAuthState } from './auth-state.js';
 import { logger } from './logger.js';
 
 const log = logger.child({ module: 'whatsapp' });
@@ -19,12 +18,15 @@ const log = logger.child({ module: 'whatsapp' });
  * One linked-device connection to WhatsApp (like WhatsApp Web).
  * Emits: 'state' (connection state changed), 'message' (parsed incoming/outgoing message),
  * 'groups' (list of { jid, name } the account participates in).
+ * `fatal` is set when the session must end (another connection replaced this one).
  */
 export class WhatsApp extends EventEmitter {
   sock = null;
   state = { status: 'starting', qr: null, me: null, error: null };
   names = new Map(); // user id (no device / server) -> display name
   groupCache = new Map(); // group jid -> metadata, reused by Baileys when sending
+  fatal = null;
+  #auth = null;
   #stopping = false;
 
   /** @param {{ selfName: () => string }} opts  how the agent is shown when someone tags it */
@@ -35,8 +37,10 @@ export class WhatsApp extends EventEmitter {
 
   async start() {
     this.#stopping = false;
-    fs.mkdirSync(config.authDir, { recursive: true });
-    const { state, saveCreds } = await useMultiFileAuthState(config.authDir);
+    await this.#auth?.flush(); // a reconnect must read the keys the previous socket wrote
+    this.#auth = await useRedisAuthState();
+    const { state, saveCreds } = this.#auth;
+    const baileysLogger = logger.child({ module: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
 
     let version;
     try {
@@ -48,8 +52,8 @@ export class WhatsApp extends EventEmitter {
     const groupCache = this.groupCache;
     const sock = makeWASocket({
       ...(version && { version }),
-      auth: state,
-      logger: logger.child({ module: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' }),
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, baileysLogger) },
+      logger: baileysLogger,
       markOnlineOnConnect: false, // keep phone notifications working
       syncFullHistory: false,
       cachedGroupMetadata: async (jid) => groupCache.get(jid),
@@ -77,15 +81,22 @@ export class WhatsApp extends EventEmitter {
       if (connection === 'close') {
         const code = lastDisconnect?.error?.output?.statusCode;
         if (this.#stopping) return;
+        if (code === DisconnectReason.connectionReplaced) {
+          log.warn('another connection replaced this one - ending the session');
+          this.fatal = 'replaced';
+          return;
+        }
         if (code === DisconnectReason.loggedOut) {
           log.warn('logged out from the phone - clearing session, a new QR will be shown');
           this.#setState({ status: 'logged_out', me: null, error: 'החיבור נותק מהטלפון' });
-          fs.rmSync(config.authDir, { recursive: true, force: true });
+          await clearAuth();
         } else {
           log.warn({ code, err: lastDisconnect?.error?.message }, 'connection closed, reconnecting');
           this.#setState({ status: 'connecting', error: lastDisconnect?.error?.message || null });
         }
-        setTimeout(() => this.start().catch((err) => log.error(err, 'restart failed')), 2000);
+        setTimeout(() => {
+          if (!this.#stopping) this.start().catch((err) => log.error(err, 'restart failed'));
+        }, 2000);
       }
     });
 
@@ -104,9 +115,11 @@ export class WhatsApp extends EventEmitter {
     });
   }
 
+  /** Closes the socket and waits until the session keys are saved, so the next session can resume. */
   async stop() {
     this.#stopping = true;
     this.sock?.end(undefined);
+    await this.#auth?.flush();
   }
 
   async logout() {
@@ -116,9 +129,13 @@ export class WhatsApp extends EventEmitter {
     } catch {
       this.sock?.end(undefined);
     }
-    fs.rmSync(config.authDir, { recursive: true, force: true });
+    await this.#auth?.flush();
+    await clearAuth();
     this.#setState({ status: 'logged_out', me: null, qr: null });
-    setTimeout(() => this.start().catch((err) => log.error(err, 'restart failed')), 1000);
+  }
+
+  get linked() {
+    return !!this.sock?.authState?.creds?.me;
   }
 
   /** Link with an 8-character code instead of a QR scan. Phone: digits with country code. */
