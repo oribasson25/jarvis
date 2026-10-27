@@ -98,6 +98,12 @@ form h2:not(:first-child) { margin-top: 26px; }
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent-strong); border-bottom-color: var(--accent); }
+/* on a phone the tabs wrap instead of hiding past the edge, where nothing hints they exist */
+@media (max-width: 700px) {
+  .tabs { flex-wrap: wrap; padding: 4px 10px; gap: 0 2px; }
+  .tab { padding: 9px 10px; }
+  .toolbar { flex-direction: column; align-items: stretch; }
+}
 
 main { max-width: 1120px; margin: 0 auto; padding: 24px 20px 60px; }
 .panel { display: none; }
