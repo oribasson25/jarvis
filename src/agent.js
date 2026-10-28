@@ -166,7 +166,7 @@ Defaults (the owner's instructions override these):
 - WhatsApp formatting only: *bold*, _italic_, ~strike~. No Markdown headings, tables, or [text](url) links.
 - ${LENGTH[s.replyLength] || LENGTH.low}
 - Don't repeat or summarize what others just said.
-- Read your own recent messages (marked "(you)") before writing. Don't reuse a joke, nickname or running gag you already used there, and don't open your messages the same way each time (for example with the person's name). A callback lands once; repeated, it is noise.
+- Never repeat yourself. Before writing, check your own messages in the transcript (marked "(you)"), including ones from earlier days: don't reuse their jokes, nicknames, references, punchlines or phrasing, and don't open your messages the same way each time (for example with the person's name). This holds even when the owner asks for callbacks: a callback brings something back once, at the right moment; making the same joke again is not a callback. If the only joke you have is one you already made, find another angle or answer plainly.
 - If people tell you to talk less, stop, or leave them alone, take it seriously: hold back for the rest of that conversation unless someone addresses you, rather than joking about it. After a break of a few hours or a new day, it no longer applies; start fresh.
 - If someone sincerely asks whether you are a bot or an AI, be honest.`;
 }
@@ -182,7 +182,10 @@ function formatLine(row, rowsByWaId, agentName) {
   return `#${row.id} [${timeFmt.format(new Date(row.ts))}] ${sender}${reply}: ${row.text}`;
 }
 
-function turnInstructions({ s, mode, addressed, newRows }) {
+// The agent's own latest messages are repeated next to the decision, where they weigh most.
+const OWN_RECENT = 8;
+
+function turnInstructions({ s, mode, addressed, newRows, mine }) {
   const lines = [`Current time: ${nowFmt.format(new Date())}.`];
   lines.push(
     newRows.length
@@ -200,6 +203,12 @@ function turnInstructions({ s, mode, addressed, newRows }) {
   }
   if (mode === 'always') {
     lines.push('Respond to the new messages (reply or react). Stay silent only if they clearly need no response.');
+  }
+  if (mine.length) {
+    lines.push(
+      "Your latest messages in this chat, newest last. If you reply, don't reuse anything from them: no joke, nickname, reference, punchline or opening:",
+      ...mine.map((r) => `- "${r.text.replace(/\s+/g, ' ').slice(0, 160)}"`),
+    );
   }
   lines.push("Where the owner's instructions say otherwise, they win over this block. Decide now.");
   return lines.join('\n');
@@ -227,7 +236,8 @@ export async function decide({ settings: s, chat, rows, newFromId, mode, address
   const lastFull = Math.floor(lines.length / CHUNK) - 1;
   if (lastFull >= 0) content[lastFull].cache_control = { type: 'ephemeral' };
   if (!content.length) content.push({ type: 'text', text: '(the chat is empty so far)' });
-  content.push({ type: 'text', text: `---\n${turnInstructions({ s, mode, addressed, newRows })}` });
+  const mine = rows.filter((r) => r.from_me).slice(-OWN_RECENT);
+  content.push({ type: 'text', text: `---\n${turnInstructions({ s, mode, addressed, newRows, mine })}` });
 
   const knowledge = chat?.jid ? await getKnowledge(chat.jid) : null;
   const request = {
