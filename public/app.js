@@ -229,6 +229,22 @@ function fillSelect(select, values, labels, withDefault) {
   for (const v of values) select.append(new Option(labels?.[v] || v, v));
 }
 
+// The form as last loaded. A save sends only what differs from it, so a page left open on another
+// device can't put back values that were changed elsewhere since.
+let savedSettings = {};
+
+function formValues(form) {
+  const values = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    values[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
+  }
+  return values;
+}
+
+const changedSettings = () =>
+  Object.fromEntries(Object.entries(formValues($('#settings-form'))).filter(([k, v]) => v !== savedSettings[k]));
+
 async function loadSettings() {
   const { settings, options } = await api('/settings');
   OPTIONS = options;
@@ -245,6 +261,7 @@ async function loadSettings() {
     if (el.type === 'checkbox') el.checked = !!v;
     else el.value = Array.isArray(v) ? v.join(', ') : v;
   }
+  savedSettings = formValues(form);
   $('#agent-title').textContent = settings.agentName || 'סוכן וואטסאפ';
   $('#mode-help').innerHTML = options.MODES.map(
     (m) => `<div><b>${esc(LABELS.mode[m])}</b>${esc(LABELS.modeHelp[m])}</div>`,
@@ -254,12 +271,8 @@ async function loadSettings() {
 
 $('#settings-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const form = e.target;
-  const body = {};
-  for (const el of form.elements) {
-    if (!el.name) continue;
-    body[el.name] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
-  }
+  const body = changedSettings();
+  if (!Object.keys(body).length) return toast('אין שינויים לשמור');
   try {
     await api('/settings', { method: 'PUT', body });
     toast('נשמר ✓');
@@ -481,8 +494,26 @@ async function toggleKnowledgeEditor(card) {
   box.hidden = false;
 }
 
+// Each card's fields as rendered; like the settings form, a save sends only what changed.
+const savedCards = new Map(); // jid -> card values
+
+function cardValues(card) {
+  return Object.fromEntries($$('select, textarea[name=extraPrompt]', card).map((el) => [el.name, el.value]));
+}
+
+function changedCard(card) {
+  const saved = savedCards.get(card.dataset.jid) || {};
+  return Object.fromEntries(Object.entries(cardValues(card)).filter(([k, v]) => v !== saved[k]));
+}
+
+/** Unsaved card edits or an open knowledge editor, which a re-render would throw away. */
+const chatsBusy = () =>
+  $$('.chat-card').some((card) => Object.keys(changedCard(card)).length || !$('.k-editor', card)?.hidden);
+
 function renderChats() {
   $('#chats-list').innerHTML = chats.map(chatCard).join('');
+  savedCards.clear();
+  for (const card of $$('.chat-card')) savedCards.set(card.dataset.jid, cardValues(card));
   $('#chats-empty').hidden = chats.length > 0;
   const building = chats.some((c) => c.knowledge?.job?.status === 'building' && !imports.has(c.jid));
   clearTimeout(renderChats.poll);
@@ -519,9 +550,9 @@ $('#chats-list').addEventListener('click', async (e) => {
     return;
   }
   if (act === 'save') {
-    const body = {};
-    for (const el of $$('select, textarea[name=extraPrompt]', card)) body[el.name] = el.value;
-    body.allowReactions = body.allowReactions === '' ? null : body.allowReactions === 'on';
+    const body = changedCard(card);
+    if (!Object.keys(body).length) return toast('אין שינויים לשמור');
+    if ('allowReactions' in body) body.allowReactions = body.allowReactions === '' ? null : body.allowReactions === 'on';
     try {
       await api(`/chats/${encodeURIComponent(jid)}`, { method: 'PUT', body });
       toast('נשמר ✓');
@@ -648,3 +679,11 @@ async function loadEvents() {
   } catch {}
   showTab(tab);
 })();
+
+// A page left open (say, on the phone) still shows what was saved when it loaded: catch up when it
+// comes back into view, unless that would throw away edits that aren't saved yet.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!Object.keys(changedSettings()).length) loadSettings().catch(() => {});
+  if ($('#tab-chats').classList.contains('active') && !chatsBusy()) loadChats().catch(() => {});
+});

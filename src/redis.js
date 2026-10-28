@@ -16,6 +16,10 @@ export function redis() {
   if (client) return client;
   if (hasPersistentStore()) {
     client = new Redis({ url: restUrl(), token: restToken(), automaticDeserialization: false });
+    // Without deserialization Upstash returns HGETALL as a flat [field, value, …] array; callers
+    // index it by field, as with MemoryRedis.
+    const hgetall = client.hgetall;
+    client.hgetall = async (...args) => toHash(await hgetall(...args));
   } else if (process.env.VERCEL) {
     throw new Error('לא מחובר מסד נתונים: הוסיפו Upstash Redis מ-Vercel ← Storage');
   } else {
@@ -23,6 +27,14 @@ export function redis() {
     client = new MemoryRedis();
   }
   return client;
+}
+
+function toHash(value) {
+  if (!Array.isArray(value)) return value;
+  if (!value.length) return null;
+  const hash = {};
+  for (let i = 0; i < value.length; i += 2) hash[value[i]] = value[i + 1];
+  return hash;
 }
 
 export function setRedis(c) {

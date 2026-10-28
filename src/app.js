@@ -86,7 +86,7 @@ export function createApp() {
   });
 
   api.get('/settings', async (req, res) => {
-    res.json({ settings: await getSettings(), defaults: DEFAULTS, options: { MODES, MODELS, EFFORTS, LEVELS } });
+    res.json({ settings: await getSettings({ fresh: true }), defaults: DEFAULTS, options: { MODES, MODELS, EFFORTS, LEVELS } });
   });
 
   api.put('/settings', async (req, res) => {
@@ -95,6 +95,7 @@ export function createApp() {
 
   api.get('/chats', async (req, res) => {
     const chats = await db.listChats();
+    await getSettings({ fresh: true }); // the effective values below read the refreshed cache
     res.json({
       fields: CHAT_FIELDS,
       chats: await Promise.all(

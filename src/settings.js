@@ -30,11 +30,12 @@ export const DEFAULTS = {
 export const CHAT_FIELDS = ['mode', 'extraPrompt', 'engagement', 'replyLength', 'allowReactions'];
 
 // The worker reads settings on every message; dashboard edits reach it within this window.
+// The dashboard reads fresh: another server instance may have saved a newer version.
 const CACHE_MS = 15_000;
 let cache = null;
 
-export async function getSettings() {
-  if (cache && Date.now() - cache.at < CACHE_MS) return cache.value;
+export async function getSettings({ fresh = false } = {}) {
+  if (!fresh && cache && Date.now() - cache.at < CACHE_MS) return cache.value;
   const value = { ...DEFAULTS, ...(await kvGet('settings', {})) };
   cache = { value, at: Date.now() };
   return value;
