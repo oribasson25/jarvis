@@ -628,6 +628,7 @@ $('#play-form').addEventListener('submit', async (e) => {
     out.innerHTML = `<h2>תוצאה</h2>
       <p class="result-action">${esc(LABELS.action[r.action] || r.action)}${r.addressed ? ' <span class="badge">פנו אליו</span>' : ''}</p>
       ${body}${target}
+      ${r.why ? `<p class="why">למה: ${esc(r.why)}</p>` : ''}
       <p class="stats">${esc(r.model)} · ${(r.ms / 1000).toFixed(1)} שנ׳ · טוקנים: ${u.input ?? 0} קלט, ${u.cacheRead ?? 0} מהמטמון, ${u.output ?? 0} פלט</p>`;
   } catch (err) {
     out.innerHTML = `<h2>תוצאה</h2><p class="error">${esc(err.message)}</p>`;
@@ -657,6 +658,7 @@ async function loadEvents() {
           <span class="type ${ev.type}">${esc(LABELS.action[ev.type] || ev.type)}</span>
           ${d.trigger ? `<div class="trigger">"${esc(d.trigger)}"</div>` : ''}
           ${out}
+          ${d.why ? `<div class="why">${esc(d.why)}</div>` : ''}
           ${d.model ? `<div class="stats">${esc(d.model)}${u}${d.ms ? ` · ${(d.ms / 1000).toFixed(1)} שנ׳` : ''}</div>` : ''}
         </div>
       </div>`;

@@ -175,6 +175,7 @@ export function createRouter(wa) {
       model: decision.model,
       usage: decision.usage,
       note: decision.note,
+      why: decision.why || undefined,
       ms: Date.now() - started,
     });
   }

@@ -78,8 +78,12 @@ const DECISION_SCHEMA = {
       type: 'integer',
       description: 'Id of the message to quote (reply) or react to; 0 for none',
     },
+    why: {
+      type: 'string',
+      description: "One short sentence in Hebrew for the owner's activity log: why this action. Never sent to the chat.",
+    },
   },
-  required: ['action', 'text', 'emoji', 'quote'],
+  required: ['action', 'text', 'emoji', 'quote', 'why'],
   additionalProperties: false,
 };
 
@@ -95,8 +99,12 @@ const ENGAGEMENT = {
   medium:
     'Take part now and then: answer open questions, add a thought or a joke when it is genuinely good. Most messages between friends need nothing from you; stay silent while people are talking among themselves.',
   high:
-    'Be an active participant, but not on every message: speak up when you have something worth saying, and let conversations between others run.',
+    'Be an active participant: answer questions, give your own take on what is happening, join the banter. Stay silent only when the new messages clearly need nothing from you.',
 };
+
+// Said with the engagement guidance when the chat has hard limits on unprompted turns.
+const RATIONED =
+  'How often you may speak up unprompted is already limited for you, so within that, don\'t hold back just to ration yourself.';
 
 const timeFmt = new Intl.DateTimeFormat('en-GB', {
   day: '2-digit',
@@ -151,7 +159,7 @@ You answer with a JSON decision:
 - "reply": send a message, written in "text". Set "quote" to a message id to reply to it explicitly (useful when answering an older message or when several conversations are interleaved); otherwise 0.
 - "react": react with a single emoji ("emoji") to the message whose id is in "quote". Good for acknowledging something without interrupting.${s.allowReactions ? '' : ' Reactions are disabled in this chat: never choose "react".'}
 - "silent": do nothing.
-Leave unused fields as "" or 0.
+Leave unused fields as "" or 0. Always fill "why": one short Hebrew sentence telling the owner why you chose this, shown only in their activity log.
 
 Defaults (the owner's instructions override these):
 - Write like a person texting, in the language the chat is using (usually Hebrew). No greetings or sign-offs, and don't start with your name or a message id.
@@ -159,7 +167,7 @@ Defaults (the owner's instructions override these):
 - ${LENGTH[s.replyLength] || LENGTH.low}
 - Don't repeat or summarize what others just said.
 - Read your own recent messages (marked "(you)") before writing. Don't reuse a joke, nickname or running gag you already used there, and don't open your messages the same way each time (for example with the person's name). A callback lands once; repeated, it is noise.
-- If people tell you to talk less, stop, or leave them alone, take it seriously: stay silent unless someone addresses you, rather than joking about it.
+- If people tell you to talk less, stop, or leave them alone, take it seriously: hold back for the rest of that conversation unless someone addresses you, rather than joking about it. After a break of a few hours or a new day, it no longer applies; start fresh.
 - If someone sincerely asks whether you are a bot or an AI, be honest.`;
 }
 
@@ -186,7 +194,10 @@ function turnInstructions({ s, mode, addressed, newRows }) {
       'You were addressed directly (tagged, called by name, or someone replied to your message). Respond to it: reply, or react if a reaction fully answers it.',
     );
   }
-  if (mode === 'smart') lines.push(ENGAGEMENT[s.engagement] || ENGAGEMENT.medium);
+  if (mode === 'smart') {
+    lines.push(ENGAGEMENT[s.engagement] || ENGAGEMENT.medium);
+    if (s.unsolicitedPerHour || s.quietGap) lines.push(RATIONED);
+  }
   if (mode === 'always') {
     lines.push('Respond to the new messages (reply or react). Stay silent only if they clearly need no response.');
   }
@@ -266,6 +277,7 @@ export async function decide({ settings: s, chat, rows, newFromId, mode, address
     action,
     text: action === 'reply' ? text : '',
     emoji: action === 'react' ? emoji : '',
+    why: (decision.why || '').trim(),
     // reactions need a target; default to the newest message from someone else
     target: action === 'react' ? target || newRows.at(-1) || null : target,
     ...meta,

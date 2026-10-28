@@ -241,6 +241,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .event .body { font-size: 0.9rem; }
 .event .trigger { color: var(--muted); }
 .event .out { white-space: pre-wrap; }
+.why { color: var(--muted); font-size: 0.85rem; font-style: italic; }
 .type { font-size: 0.72rem; font-weight: 700; padding: 1px 8px; border-radius: 999px; margin-inline-start: 6px; }
 .type.reply { background: var(--accent-soft); color: var(--accent-strong); }
 .type.react { background: #e3edff; color: #2b55a8; }
