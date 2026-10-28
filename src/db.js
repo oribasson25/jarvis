@@ -12,6 +12,7 @@ import { redis } from './redis.js';
  *   chat:<jid>:wa:<waId>      WhatsApp id -> message id (dedupe, expires)
  *   chat:<jid>:seen           last message id the agent already considered
  *   chat:<jid>:actions        sorted set of agent reply/react timestamps (rate limit)
+ *   chat:<jid>:unsolicited    the same, only for turns nobody addressed the agent in
  *   chat:<jid>:knowledge      profile and style samples learned from an imported chat export
  *   events                    activity log, newest first (trimmed)
  *   pending                   hash: jid -> "1"/"0" turns handed over to the next worker session
@@ -211,8 +212,11 @@ export async function logEvent(chatJid, type, detail = {}) {
     .lpush('events', JSON.stringify({ ts, chat_jid: chatJid || null, type, detail }))
     .ltrim('events', 0, KEEP_EVENTS - 1);
   if (chatJid && (type === 'reply' || type === 'react')) {
-    const key = `chat:${chatJid}:actions`;
-    pipe.zadd(key, { score: ts, member: `${ts}:${Math.random()}` }).zremrangebyscore(key, 0, ts - 2 * 3600_000);
+    const keys = [`chat:${chatJid}:actions`];
+    if (!detail.addressed) keys.push(`chat:${chatJid}:unsolicited`);
+    for (const key of keys) {
+      pipe.zadd(key, { score: ts, member: `${ts}:${Math.random()}` }).zremrangebyscore(key, 0, ts - 2 * 3600_000);
+    }
   }
   await pipe.exec();
 }
@@ -221,8 +225,9 @@ export async function listEvents(limit = 100) {
   return (await r().lrange('events', 0, limit - 1)).map((s) => parse(s, null)).filter(Boolean);
 }
 
-export async function countBotActionsSince(chatJid, sinceTs) {
-  return Number(await r().zcount(`chat:${chatJid}:actions`, sinceTs, '+inf'));
+/** Replies and reactions since `sinceTs`; with `unsolicited`, only those nobody addressed the agent for. */
+export async function countBotActionsSince(chatJid, sinceTs, { unsolicited = false } = {}) {
+  return Number(await r().zcount(`chat:${chatJid}:${unsolicited ? 'unsolicited' : 'actions'}`, sinceTs, '+inf'));
 }
 
 /* ---------- knowledge from an imported chat export (see knowledge.js) ---------- */

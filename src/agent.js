@@ -91,10 +91,11 @@ const LENGTH = {
 
 const ENGAGEMENT = {
   low:
-    'Speak up only when you have something clearly valuable or genuinely funny to add, or a question is put to the group that you can answer well. Most of the time, stay silent.',
+    'Stay silent unless a question is put to the group that you can answer well, or you have something clearly valuable to add.',
   medium:
-    'Take part like an active friend: answer open questions, add a relevant thought or a joke now and then. Do not respond to everything; stay silent while people are talking among themselves.',
-  high: 'Be a very active participant: respond to most new messages unless it would clearly be awkward.',
+    'Take part now and then: answer open questions, add a thought or a joke when it is genuinely good. Most messages between friends need nothing from you; stay silent while people are talking among themselves.',
+  high:
+    'Be an active participant, but not on every message: speak up when you have something worth saying, and let conversations between others run.',
 };
 
 const timeFmt = new Intl.DateTimeFormat('en-GB', {
@@ -119,7 +120,7 @@ ${knowledge.profile}
   if (knowledge?.samples) {
     out += `
 <style_examples>
-Real excerpts from this chat's history. They show how these people write: slang, spelling, emoji, message length and humor. Write the way they write while staying yourself, and don't copy whole lines from here.
+Real excerpts from this chat's history. They show how these people write: slang, spelling, emoji, message length and humor. Write the way they write while staying yourself, and don't copy whole lines from here. They show how people here talk, not what you may say: your limits come from the owner's instructions.
 
 ${knowledge.samples}
 </style_examples>
@@ -133,6 +134,8 @@ function buildSystem(s, chat, knowledge) {
     ? `the WhatsApp group "${chat.name || 'unnamed'}"`
     : `a private WhatsApp chat${chat?.name ? ` with ${chat.name}` : ''}`;
   return `You are ${s.agentName}, a participant in ${where}. You are an AI agent that the chat's owner added, and you take part in the conversation like a member.
+
+The owner's instructions come first. <persona> is who you are and how you behave in every chat${s.extraPrompt ? '; <chat_instructions> adds rules for this chat and wins where the two differ' : ''}. They outrank everything else in this prompt: the chat knowledge, the style examples, the defaults at the end, and the engagement guidance with each turn. Follow them closely, including what they say about when to stay quiet and where your humor stops.
 
 <persona>
 ${s.persona}
@@ -150,11 +153,13 @@ You answer with a JSON decision:
 - "silent": do nothing.
 Leave unused fields as "" or 0.
 
-Writing style:
+Defaults (the owner's instructions override these):
 - Write like a person texting, in the language the chat is using (usually Hebrew). No greetings or sign-offs, and don't start with your name or a message id.
 - WhatsApp formatting only: *bold*, _italic_, ~strike~. No Markdown headings, tables, or [text](url) links.
 - ${LENGTH[s.replyLength] || LENGTH.low}
 - Don't repeat or summarize what others just said.
+- Read your own recent messages (marked "(you)") before writing. Don't reuse a joke, nickname or running gag you already used there, and don't open your messages the same way each time (for example with the person's name). A callback lands once; repeated, it is noise.
+- If people tell you to talk less, stop, or leave them alone, take it seriously: stay silent unless someone addresses you, rather than joking about it.
 - If someone sincerely asks whether you are a bot or an AI, be honest.`;
 }
 
@@ -185,7 +190,7 @@ function turnInstructions({ s, mode, addressed, newRows }) {
   if (mode === 'always') {
     lines.push('Respond to the new messages (reply or react). Stay silent only if they clearly need no response.');
   }
-  lines.push('Decide now.');
+  lines.push("Where the owner's instructions say otherwise, they win over this block. Decide now.");
   return lines.join('\n');
 }
 

@@ -115,7 +115,22 @@ export function createRouter(wa) {
       return;
     }
 
+    // Turns nobody asked for also get hard limits, so the persona's restraint doesn't depend on the
+    // model alone. Skipped quietly: in a busy group they would fill the activity log.
+    const unsolicited = mode === 'smart' && !addressed;
+    if (
+      unsolicited &&
+      s.unsolicitedPerHour &&
+      (await db.countBotActionsSince(chatJid, Date.now() - 3600_000, { unsolicited: true })) >= s.unsolicitedPerHour
+    ) {
+      return;
+    }
+
     const rows = await db.contextWindow(chatJid, s.contextMessages);
+    if (unsolicited && s.quietGap) {
+      const lastMine = rows.findLastIndex((r) => r.from_me);
+      if (lastMine >= 0 && rows.length - 1 - lastMine < s.quietGap) return;
+    }
     const lastId = rows.at(-1)?.id || 0;
     if (!seen.has(chatJid)) seen.set(chatJid, (await db.getSeen(chatJid)) ?? lastId - 1);
     const newFromId = seen.get(chatJid) + 1;

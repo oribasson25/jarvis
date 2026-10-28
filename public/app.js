@@ -13,7 +13,7 @@ const LABELS = {
   },
   engagement: { low: 'נמוכה, מתערב לעיתים רחוקות', medium: 'בינונית', high: 'גבוהה, משתתף פעיל' },
   length: { low: 'קצר (שורה-שתיים)', medium: 'בינוני', high: 'ארוך כשצריך' },
-  effort: { low: 'מהיר (מומלץ לצ׳אט)', medium: 'בינוני', high: 'עמוק' },
+  effort: { low: 'מהיר, נצמד פחות להנחיות', medium: 'בינוני (מומלץ)', high: 'עמוק' },
   model: {
     'claude-opus-5-5': 'Claude Opus 5.5 · הכי חכם',
     'claude-sonnet-5-5': 'Claude Sonnet 5.5 · מאוזן',

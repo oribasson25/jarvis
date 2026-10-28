@@ -13,13 +13,16 @@ export const DEFAULTS = {
     'כשמבקשים ממך מידע או עזרה, אתה עונה בצורה מדויקת ותמציתית.',
   triggerWords: ['ג׳ארוויס', 'גארוויס', 'jarvis'],
   model: 'claude-opus-5-5',
-  effort: 'low',
+  effort: 'medium', // low thinks less and follows the persona less closely
   replyLength: 'low', // low = one-liners, high = longer answers
   engagement: 'medium', // smart mode: how eager to join the conversation
   allowReactions: true,
   contextMessages: 60,
   debounceSeconds: 4,
   maxActionsPerHour: 20,
+  // smart mode, turns nobody asked for: hard limits the model can't talk its way around (0 = none)
+  unsolicitedPerHour: 12,
+  quietGap: 2, // messages from others since the agent last spoke
   defaultGroupMode: 'mention',
   defaultDmMode: 'off',
   quietFrom: '', // "23:30" - empty disables quiet hours
